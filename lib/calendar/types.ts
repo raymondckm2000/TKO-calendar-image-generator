@@ -6,4 +6,6 @@ export interface CalendarEvent {
   start: string;
   end: string;
   allDay: boolean;
+  multiDay?: boolean;
+  displayTime?: string;
 }

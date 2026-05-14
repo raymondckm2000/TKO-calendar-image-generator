@@ -5,6 +5,7 @@ import type {
   VEvent,
 } from "node-ical";
 
+import { CALENDAR_TIME_ZONE } from "./constants";
 import type { CalendarEvent } from "./types";
 
 type DateParts = {
@@ -144,6 +145,53 @@ function getDateParts(date: DateWithTimeZone): DateParts {
   };
 }
 
+function formatDateKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: CALENDAR_TIME_ZONE,
+    year: "numeric",
+  }).formatToParts(date);
+
+  const datePart = {
+    day: parts.find((part) => part.type === "day")?.value,
+    month: parts.find((part) => part.type === "month")?.value,
+    year: parts.find((part) => part.type === "year")?.value,
+  };
+
+  return `${datePart.year}-${datePart.month}-${datePart.day}`;
+}
+
+function formatDisplayTime(start: DateWithTimeZone, allDay: boolean): string | undefined {
+  if (allDay) {
+    return undefined;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    hour12: true,
+    minute: "2-digit",
+    timeZone: CALENDAR_TIME_ZONE,
+  })
+    .format(start)
+    .toLowerCase()
+    .replace(":00", "")
+    .replace(/\s/g, "");
+}
+
+function isMultiDayEvent(
+  start: DateWithTimeZone,
+  end: DateWithTimeZone,
+  allDay: boolean,
+): boolean {
+  const displayEnd =
+    allDay && end.getTime() > start.getTime()
+      ? new Date(end.getTime() - 1) as DateWithTimeZone
+      : end;
+
+  return formatDateKey(start) !== formatDateKey(displayEnd);
+}
+
 function isEventInMonth(event: VEvent, month: number, year: number): boolean {
   if (!isValidDate(event.start)) {
     return false;
@@ -161,6 +209,9 @@ function normalizeEvent(event: VEvent, fallbackId: string): CalendarEvent | null
   const end = isValidDate(event.end) ? event.end : event.start;
   const description = normalizeText(event.description);
   const location = normalizeText(event.location);
+  const allDay = Boolean(event.start.dateOnly || event.datetype === "date");
+  const displayTime = formatDisplayTime(event.start, allDay);
+  const multiDay = isMultiDayEvent(event.start, end, allDay);
 
   return {
     id: event.uid || fallbackId,
@@ -169,7 +220,9 @@ function normalizeEvent(event: VEvent, fallbackId: string): CalendarEvent | null
     ...(location ? { location } : {}),
     start: event.start.toISOString(),
     end: end.toISOString(),
-    allDay: Boolean(event.start.dateOnly || event.datetype === "date"),
+    allDay,
+    ...(multiDay ? { multiDay } : {}),
+    ...(displayTime ? { displayTime } : {}),
   };
 }
 
@@ -182,6 +235,8 @@ function normalizeFallbackEvent(
   }
 
   const end = isValidDate(event.end) ? event.end : event.start;
+  const displayTime = formatDisplayTime(event.start, event.allDay);
+  const multiDay = isMultiDayEvent(event.start, end, event.allDay);
 
   return {
     id: event.uid || fallbackId,
@@ -191,6 +246,8 @@ function normalizeFallbackEvent(
     start: event.start.toISOString(),
     end: end.toISOString(),
     allDay: event.allDay,
+    ...(multiDay ? { multiDay } : {}),
+    ...(displayTime ? { displayTime } : {}),
   };
 }
 
