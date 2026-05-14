@@ -1,4 +1,3 @@
-import { CALENDAR_TIME_ZONE } from "@/lib/calendar/constants";
 import { generateMonthMatrix } from "@/lib/calendar/month";
 import type { CalendarEvent } from "@/lib/calendar/types";
 
@@ -13,28 +12,16 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function formatMonthTitle(year: number, month: number): string {
   return new Intl.DateTimeFormat("en-US", {
     month: "long",
-    timeZone: CALENDAR_TIME_ZONE,
     year: "numeric",
   }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
-function formatEventTime(event: CalendarEvent): string {
-  if (event.allDay) {
-    return "All Day";
+function getEventDetail(event: CalendarEvent): string | undefined {
+  if (event.displayTime && event.location) {
+    return `${event.displayTime} ${event.location}`;
   }
 
-  const start = new Date(event.start);
-
-  if (Number.isNaN(start.getTime())) {
-    return "";
-  }
-
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    hour12: false,
-    minute: "2-digit",
-    timeZone: CALENDAR_TIME_ZONE,
-  }).format(start);
+  return event.displayTime || event.location || event.description;
 }
 
 export function MonthlyCalendar({ year, month, events }: MonthlyCalendarProps) {
@@ -82,7 +69,7 @@ export function MonthlyCalendar({ year, month, events }: MonthlyCalendarProps) {
 
                       <div className="flex flex-col gap-1">
                         {day.events.map((event) => {
-                          const eventTime = formatEventTime(event);
+                          const eventDetail = getEventDetail(event);
 
                           return (
                             <div
@@ -92,9 +79,9 @@ export function MonthlyCalendar({ year, month, events }: MonthlyCalendarProps) {
                               <div className="truncate text-[11px] font-semibold leading-4 text-teal-950">
                                 {event.title}
                               </div>
-                              {eventTime ? (
-                                <div className="text-[10px] font-medium leading-4 text-teal-700">
-                                  {eventTime}
+                              {eventDetail ? (
+                                <div className="truncate text-[10px] font-medium leading-4 text-teal-700">
+                                  {eventDetail}
                                 </div>
                               ) : null}
                             </div>
