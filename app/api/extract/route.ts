@@ -22,6 +22,14 @@ function isValidYear(year: number): boolean {
   return year >= 1 && year <= 9999;
 }
 
+function serializeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+
+  return String(error);
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const month = parseIntegerParam(searchParams.get("month"));
@@ -51,10 +59,15 @@ export async function GET(request: Request) {
       events,
     });
   } catch (error) {
+    const details = serializeError(error);
     console.error("Calendar extraction failed:", error);
 
     return NextResponse.json(
-      { success: false, error: "Failed to parse calendar events." },
+      {
+        success: false,
+        error: "Failed to parse calendar events.",
+        details,
+      },
       { status: 500 },
     );
   }

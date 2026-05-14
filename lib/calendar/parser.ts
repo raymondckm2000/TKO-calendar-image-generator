@@ -1,4 +1,5 @@
 import type {
+  CalendarResponse,
   DateWithTimeZone,
   ParameterValue,
   VEvent,
@@ -10,6 +11,79 @@ type DateParts = {
   month: number;
   year: number;
 };
+
+type FallbackEvent = {
+  uid?: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  start?: DateWithTimeZone;
+  end?: DateWithTimeZone;
+  allDay: boolean;
+};
+
+const MAX_ERROR_BODY_LENGTH = 500;
+const ICS_CONTENT_TYPES = [
+  "text/calendar",
+  "application/calendar",
+  "application/octet-stream",
+  "text/plain",
+];
+
+async function fetchIcsText(url: string): Promise<string> {
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      headers: {
+        accept: "text/calendar,text/plain,*/*",
+        "user-agent": "TKO Calendar Image Generator/1.0",
+      },
+      redirect: "follow",
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to fetch ICS feed: ${getErrorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `ICS feed request failed with HTTP ${response.status} ${response.statusText}: ${responseText.slice(0, MAX_ERROR_BODY_LENGTH)}`,
+    );
+  }
+
+  if (!responseText.trim()) {
+    throw new Error("ICS feed response was empty.");
+  }
+
+  if (
+    contentType &&
+    !ICS_CONTENT_TYPES.some((allowedType) =>
+      contentType.toLowerCase().includes(allowedType),
+    )
+  ) {
+    throw new Error(`ICS feed returned unsupported content type: ${contentType}.`);
+  }
+
+  if (!responseText.includes("BEGIN:VCALENDAR")) {
+    throw new Error("ICS feed response did not contain BEGIN:VCALENDAR.");
+  }
+
+  return responseText;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+
+  return String(error);
+}
 
 function normalizeText(value: ParameterValue | undefined): string | undefined {
   if (typeof value === "string") {
@@ -99,16 +173,179 @@ function normalizeEvent(event: VEvent, fallbackId: string): CalendarEvent | null
   };
 }
 
-export async function parseCalendarEvents(
-  url: string,
+function normalizeFallbackEvent(
+  event: FallbackEvent,
+  fallbackId: string,
+): CalendarEvent | null {
+  if (!isValidDate(event.start)) {
+    return null;
+  }
+
+  const end = isValidDate(event.end) ? event.end : event.start;
+
+  return {
+    id: event.uid || fallbackId,
+    title: event.summary?.trim() || "Untitled event",
+    ...(event.description?.trim() ? { description: event.description.trim() } : {}),
+    ...(event.location?.trim() ? { location: event.location.trim() } : {}),
+    start: event.start.toISOString(),
+    end: end.toISOString(),
+    allDay: event.allDay,
+  };
+}
+
+function unfoldIcsLines(icsText: string): string[] {
+  const lines = icsText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const unfoldedLines: string[] = [];
+
+  for (const line of lines) {
+    if (/^[ \t]/.test(line) && unfoldedLines.length > 0) {
+      unfoldedLines[unfoldedLines.length - 1] += line.slice(1);
+    } else {
+      unfoldedLines.push(line);
+    }
+  }
+
+  return unfoldedLines;
+}
+
+function unescapeIcsText(value: string): string {
+  return value
+    .replace(/\\n/gi, "\n")
+    .replace(/\\,/g, ",")
+    .replace(/\\;/g, ";")
+    .replace(/\\\\/g, "\\");
+}
+
+function parseIcsDate(value: string, allDay: boolean): DateWithTimeZone | undefined {
+  if (allDay && /^\d{8}$/.test(value)) {
+    const year = Number.parseInt(value.slice(0, 4), 10);
+    const month = Number.parseInt(value.slice(4, 6), 10) - 1;
+    const day = Number.parseInt(value.slice(6, 8), 10);
+    const date = new Date(Date.UTC(year, month, day)) as DateWithTimeZone;
+    date.dateOnly = true;
+    return date;
+  }
+
+  const dateTimeMatch = value.match(
+    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/,
+  );
+
+  if (!dateTimeMatch) {
+    return undefined;
+  }
+
+  const [, year, month, day, hour, minute, second, utc] = dateTimeMatch;
+  const parsedDate = utc
+    ? new Date(
+        Date.UTC(
+          Number.parseInt(year, 10),
+          Number.parseInt(month, 10) - 1,
+          Number.parseInt(day, 10),
+          Number.parseInt(hour, 10),
+          Number.parseInt(minute, 10),
+          Number.parseInt(second, 10),
+        ),
+      )
+    : new Date(
+        Number.parseInt(year, 10),
+        Number.parseInt(month, 10) - 1,
+        Number.parseInt(day, 10),
+        Number.parseInt(hour, 10),
+        Number.parseInt(minute, 10),
+        Number.parseInt(second, 10),
+      );
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return undefined;
+  }
+
+  return parsedDate as DateWithTimeZone;
+}
+
+function parseFallbackIcsEvents(
+  icsText: string,
   month: number,
   year: number,
-): Promise<CalendarEvent[]> {
-  const { createRequire } = await import("node:module");
-  const nodeRequire = createRequire(`${process.cwd()}/package.json`);
-  const ical = nodeRequire(["node", "ical"].join("-")) as typeof import("node-ical");
-  const calendar = await ical.async.fromURL(url);
+): CalendarEvent[] {
+  const events: CalendarEvent[] = [];
+  let currentEvent: FallbackEvent | null = null;
 
+  for (const line of unfoldIcsLines(icsText)) {
+    if (line === "BEGIN:VEVENT") {
+      currentEvent = { allDay: false };
+      continue;
+    }
+
+    if (line === "END:VEVENT") {
+      if (currentEvent?.start) {
+        const dateParts = getDateParts(currentEvent.start);
+
+        if (dateParts.month === month && dateParts.year === year) {
+          const event = normalizeFallbackEvent(
+            currentEvent,
+            `fallback-${events.length + 1}`,
+          );
+
+          if (event) {
+            events.push(event);
+          }
+        }
+      }
+
+      currentEvent = null;
+      continue;
+    }
+
+    if (!currentEvent) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const rawName = line.slice(0, separatorIndex);
+    const value = line.slice(separatorIndex + 1);
+    const [name, ...params] = rawName.split(";");
+    const allDay = params.some((param) => param.toUpperCase() === "VALUE=DATE");
+
+    switch (name.toUpperCase()) {
+      case "UID":
+        currentEvent.uid = unescapeIcsText(value);
+        break;
+      case "SUMMARY":
+        currentEvent.summary = unescapeIcsText(value);
+        break;
+      case "DESCRIPTION":
+        currentEvent.description = unescapeIcsText(value);
+        break;
+      case "LOCATION":
+        currentEvent.location = unescapeIcsText(value);
+        break;
+      case "DTSTART":
+        currentEvent.allDay = allDay;
+        currentEvent.start = parseIcsDate(value, allDay);
+        break;
+      case "DTEND":
+        currentEvent.end = parseIcsDate(value, allDay);
+        break;
+    }
+  }
+
+  return events.sort(
+    (firstEvent, secondEvent) =>
+      Date.parse(firstEvent.start) - Date.parse(secondEvent.start),
+  );
+}
+
+function normalizeParsedCalendar(
+  calendar: CalendarResponse,
+  month: number,
+  year: number,
+): CalendarEvent[] {
   return Object.entries(calendar)
     .filter((entry): entry is [string, VEvent] => isVEvent(entry[1]))
     .filter(([, event]) => isEventInMonth(event, month, year))
@@ -118,4 +355,23 @@ export async function parseCalendarEvents(
       (firstEvent, secondEvent) =>
         Date.parse(firstEvent.start) - Date.parse(secondEvent.start),
     );
+}
+
+export async function parseCalendarEvents(
+  url: string,
+  month: number,
+  year: number,
+): Promise<CalendarEvent[]> {
+  const icsText = await fetchIcsText(url);
+
+  try {
+    const { createRequire } = await import("node:module");
+    const nodeRequire = createRequire(`${process.cwd()}/package.json`);
+    const ical = nodeRequire(["node", "ical"].join("-")) as typeof import("node-ical");
+    const calendar = ical.parseICS(icsText) as CalendarResponse;
+    return normalizeParsedCalendar(calendar, month, year);
+  } catch (error) {
+    console.warn("node-ical parseICS failed; using ICS fallback parser.", error);
+    return parseFallbackIcsEvents(icsText, month, year);
+  }
 }
