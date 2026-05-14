@@ -1,3 +1,4 @@
+import { CALENDAR_TIME_ZONE } from "@/lib/calendar/constants";
 import { generateMonthMatrix } from "@/lib/calendar/month";
 import type { CalendarEvent } from "@/lib/calendar/types";
 
@@ -8,7 +9,6 @@ interface MonthlyCalendarProps {
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const CALENDAR_TIME_ZONE = "Asia/Hong_Kong";
 
 function formatMonthTitle(year: number, month: number): string {
   return new Intl.DateTimeFormat("en-US", {

@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 
+import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
 import { parseCalendarEvents } from "@/lib/calendar/parser";
 
 export const runtime = "nodejs";
-
-const DEFAULT_ICS_URL =
-  "https://calendar.google.com/calendar/ical/6cq5boqnnjp23j95rn54o95o5o%40group.calendar.google.com/public/basic.ics";
 
 function parseIntegerParam(value: string | null): number | null {
   if (!value || !/^\d+$/.test(value)) {

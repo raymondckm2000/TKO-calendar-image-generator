@@ -1,11 +1,10 @@
+import { CALENDAR_TIME_ZONE } from "./constants";
 import type { CalendarEvent } from "./types";
 
 export interface CalendarDay {
   date: Date | null;
   events: CalendarEvent[];
 }
-
-const CALENDAR_TIME_ZONE = "Asia/Hong_Kong";
 
 function formatDateKey(date: Date): string {
   const parts = new Intl.DateTimeFormat("en-CA", {

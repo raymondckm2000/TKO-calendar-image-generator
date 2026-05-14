@@ -1,67 +1,24 @@
-import { headers } from "next/headers";
-
 import { MonthlyCalendar } from "@/components/calendar/MonthlyCalendar";
+import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
+import { parseCalendarEvents } from "@/lib/calendar/parser";
 import type { CalendarEvent } from "@/lib/calendar/types";
 
 const DEMO_MONTH = 5;
 const DEMO_YEAR = 2026;
 
-interface ExtractResponse {
-  success: boolean;
-  count?: number;
-  events?: CalendarEvent[];
-}
-
-function isCalendarEvent(value: unknown): value is CalendarEvent {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const event = value as Partial<CalendarEvent>;
-
-  return (
-    typeof event.id === "string" &&
-    typeof event.title === "string" &&
-    typeof event.start === "string" &&
-    typeof event.end === "string" &&
-    typeof event.allDay === "boolean"
-  );
-}
-
-function normalizeExtractResponse(value: unknown): CalendarEvent[] {
-  const response = value as ExtractResponse;
-
-  if (!response?.success || !Array.isArray(response.events)) {
-    return [];
-  }
-
-  return response.events.filter(isCalendarEvent);
-}
+export const dynamic = "force-dynamic";
 
 async function fetchDemoEvents(): Promise<{
   events: CalendarEvent[];
   error: string | null;
 }> {
   try {
-    const requestHeaders = await headers();
-    const host = requestHeaders.get("host");
-
-    if (!host) {
-      return { events: [], error: "Calendar API host unavailable." };
-    }
-
-    const protocol = process.env.NODE_ENV === "development" ? "http" : "https";
-    const response = await fetch(
-      `${protocol}://${host}/api/extract?month=${DEMO_MONTH}&year=${DEMO_YEAR}`,
-      { cache: "no-store" },
+    const events = await parseCalendarEvents(
+      DEFAULT_ICS_URL,
+      DEMO_MONTH,
+      DEMO_YEAR,
     );
-
-    if (!response.ok) {
-      return { events: [], error: "Calendar events unavailable." };
-    }
-
-    const payload: unknown = await response.json();
-    return { events: normalizeExtractResponse(payload), error: null };
+    return { events, error: null };
   } catch {
     return { events: [], error: "Calendar events unavailable." };
   }
