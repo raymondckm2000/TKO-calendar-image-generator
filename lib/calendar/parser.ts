@@ -24,6 +24,7 @@ type FallbackEvent = {
 };
 
 const MAX_ERROR_BODY_LENGTH = 500;
+const ONE_DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ICS_CONTENT_TYPES = [
   "text/calendar",
   "application/calendar",
@@ -179,6 +180,10 @@ function formatDisplayTime(start: DateWithTimeZone, allDay: boolean): string | u
     .replace(/\s/g, "");
 }
 
+function isDateOnlyEvent(event: VEvent): boolean {
+  return event.start?.dateOnly === true || event.datetype === "date";
+}
+
 function isMultiDayEvent(
   start: DateWithTimeZone,
   end: DateWithTimeZone,
@@ -186,7 +191,7 @@ function isMultiDayEvent(
 ): boolean {
   const displayEnd =
     allDay && end.getTime() > start.getTime()
-      ? new Date(end.getTime() - 1) as DateWithTimeZone
+      ? (new Date(end.getTime() - ONE_DAY_IN_MS) as DateWithTimeZone)
       : end;
 
   return formatDateKey(start) !== formatDateKey(displayEnd);
@@ -209,7 +214,7 @@ function normalizeEvent(event: VEvent, fallbackId: string): CalendarEvent | null
   const end = isValidDate(event.end) ? event.end : event.start;
   const description = normalizeText(event.description);
   const location = normalizeText(event.location);
-  const allDay = Boolean(event.start.dateOnly || event.datetype === "date");
+  const allDay = isDateOnlyEvent(event);
   const displayTime = formatDisplayTime(event.start, allDay);
   const multiDay = isMultiDayEvent(event.start, end, allDay);
 
@@ -320,6 +325,16 @@ function parseIcsDate(value: string, allDay: boolean): DateWithTimeZone | undefi
   return parsedDate as DateWithTimeZone;
 }
 
+function isDateOnlyIcsValue(value: string, params: string[]): boolean {
+  const normalizedParams = params.map((param) => param.toUpperCase());
+
+  if (normalizedParams.includes("VALUE=DATE-TIME")) {
+    return false;
+  }
+
+  return normalizedParams.includes("VALUE=DATE") || /^\d{8}$/.test(value);
+}
+
 function parseFallbackIcsEvents(
   icsText: string,
   month: number,
@@ -367,7 +382,7 @@ function parseFallbackIcsEvents(
     const rawName = line.slice(0, separatorIndex);
     const value = line.slice(separatorIndex + 1);
     const [name, ...params] = rawName.split(";");
-    const allDay = params.some((param) => param.toUpperCase() === "VALUE=DATE");
+    const allDay = isDateOnlyIcsValue(value, params);
 
     switch (name.toUpperCase()) {
       case "UID":
