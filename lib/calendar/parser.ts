@@ -22,6 +22,9 @@ type FallbackEvent = {
   start?: DateWithTimeZone;
   end?: DateWithTimeZone;
   allDay: boolean;
+  exdates?: DateWithTimeZone[];
+  recurrenceId?: DateWithTimeZone;
+  rrule?: string;
 };
 
 export type CalendarSourceStatus =
@@ -640,7 +643,11 @@ function unescapeIcsText(value: string): string {
     .replace(/\\\\/g, "\\");
 }
 
-function parseIcsDate(value: string, allDay: boolean): DateWithTimeZone | undefined {
+function parseIcsDate(
+  value: string,
+  allDay: boolean,
+  timeZone?: string,
+): DateWithTimeZone | undefined {
   if (allDay && /^\d{8}$/.test(value)) {
     const year = Number.parseInt(value.slice(0, 4), 10);
     const month = Number.parseInt(value.slice(4, 6), 10) - 1;
@@ -659,13 +666,13 @@ function parseIcsDate(value: string, allDay: boolean): DateWithTimeZone | undefi
   }
 
   const [, year, month, day, hour, minute, second, utc] = dateTimeMatch;
-  const parsedDate = utc
+  const parsedDate = utc || timeZone === CALENDAR_TIME_ZONE
     ? new Date(
         Date.UTC(
           Number.parseInt(year, 10),
           Number.parseInt(month, 10) - 1,
           Number.parseInt(day, 10),
-          Number.parseInt(hour, 10),
+          Number.parseInt(hour, 10) - (timeZone === CALENDAR_TIME_ZONE && !utc ? 8 : 0),
           Number.parseInt(minute, 10),
           Number.parseInt(second, 10),
         ),
@@ -683,7 +690,290 @@ function parseIcsDate(value: string, allDay: boolean): DateWithTimeZone | undefi
     return undefined;
   }
 
-  return parsedDate as DateWithTimeZone;
+  const date = parsedDate as DateWithTimeZone;
+
+  if (timeZone) {
+    date.tz = timeZone;
+  }
+
+  return date;
+}
+
+function getCalendarEventKey(event: CalendarEvent): string {
+  return [
+    event.title,
+    event.start,
+    event.end,
+    event.allDay ? "all-day" : "timed",
+    event.displayTime ?? "",
+    event.location ?? "",
+  ].join("|");
+}
+
+function dedupeCalendarEvents(events: CalendarEvent[]): CalendarEvent[] {
+  return events.filter(
+    (event, index, allEvents) =>
+      allEvents.findIndex(
+        (candidateEvent) =>
+          getCalendarEventKey(candidateEvent) === getCalendarEventKey(event),
+      ) === index,
+  );
+}
+
+function getTimeParts(date: DateWithTimeZone): {
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    hour12: false,
+    minute: "numeric",
+    second: "numeric",
+    timeZone: date.tz || CALENDAR_TIME_ZONE,
+  }).formatToParts(date);
+
+  return {
+    hour: Number.parseInt(parts.find((part) => part.type === "hour")?.value ?? "0", 10),
+    minute: Number.parseInt(parts.find((part) => part.type === "minute")?.value ?? "0", 10),
+    second: Number.parseInt(parts.find((part) => part.type === "second")?.value ?? "0", 10),
+  };
+}
+
+function createFallbackOccurrenceDate(
+  parts: DateParts,
+  timeParts: { hour: number; minute: number; second: number },
+  allDay: boolean,
+  timeZone?: string,
+): DateWithTimeZone {
+  const date = allDay
+    ? new Date(Date.UTC(parts.year, parts.month - 1, parts.day))
+    : new Date(
+        Date.UTC(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          timeParts.hour - (timeZone === CALENDAR_TIME_ZONE ? 8 : 0),
+          timeParts.minute,
+          timeParts.second,
+        ),
+      );
+  const occurrenceDate = date as DateWithTimeZone;
+
+  if (allDay) {
+    occurrenceDate.dateOnly = true;
+  }
+  occurrenceDate.tz = timeZone;
+
+  return occurrenceDate;
+}
+
+function parseFallbackRRule(rrule: string): Record<string, string> {
+  return Object.fromEntries(
+    rrule
+      .split(";")
+      .map((part) => part.split("="))
+      .filter((part): part is [string, string] => part.length === 2),
+  );
+}
+
+function getWeekdayCode(parts: DateParts): string {
+  return ["SU", "MO", "TU", "WE", "TH", "FR", "SA"][
+    new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()
+  ];
+}
+
+function doesDateMatchByDay(parts: DateParts, byDay: string): boolean {
+  return byDay.split(",").some((ruleDay) => {
+    const match = ruleDay.match(/^([+-]?\d)?([A-Z]{2})$/);
+
+    if (!match || getWeekdayCode(parts) !== match[2]) {
+      return false;
+    }
+
+    return !match[1] || Math.floor((parts.day - 1) / 7) + 1 === Number.parseInt(match[1], 10);
+  });
+}
+
+function doesDateMatchFallbackRRule(
+  parts: DateParts,
+  startParts: DateParts,
+  rrule: Record<string, string>,
+): boolean {
+  if (createDateKey(parts) < createDateKey(startParts)) {
+    return false;
+  }
+
+  if (rrule.FREQ === "WEEKLY") {
+    return rrule.BYDAY
+      ? doesDateMatchByDay(parts, rrule.BYDAY)
+      : getWeekdayCode(parts) === getWeekdayCode(startParts);
+  }
+
+  if (rrule.FREQ === "MONTHLY") {
+    return rrule.BYDAY
+      ? doesDateMatchByDay(parts, rrule.BYDAY)
+      : parts.day === startParts.day;
+  }
+
+  return false;
+}
+
+function isFallbackExcluded(
+  event: FallbackEvent,
+  occurrenceStart: DateWithTimeZone,
+): boolean {
+  const occurrenceKey = createDateKey(getDateParts(occurrenceStart));
+
+  return (event.exdates ?? []).some(
+    (exdate) => createDateKey(getDateParts(exdate)) === occurrenceKey,
+  );
+}
+
+function isFallbackOverridden(
+  event: FallbackEvent,
+  occurrenceStart: DateWithTimeZone,
+  events: FallbackEvent[],
+): boolean {
+  const occurrenceKey = createDateKey(getDateParts(occurrenceStart));
+
+  return events.some(
+    (candidateEvent) =>
+      candidateEvent.uid === event.uid &&
+      candidateEvent.recurrenceId &&
+      createDateKey(getDateParts(candidateEvent.recurrenceId)) === occurrenceKey,
+  );
+}
+
+function getFallbackOccurrenceCount(
+  event: FallbackEvent,
+  candidateParts: DateParts,
+  rrule: Record<string, string>,
+): number {
+  if (!event.start) {
+    return 0;
+  }
+
+  const startParts = getDateParts(event.start);
+  let count = 0;
+
+  for (let year = startParts.year; year <= candidateParts.year; year += 1) {
+    for (
+      let month = year === startParts.year ? startParts.month : 1;
+      month <= (year === candidateParts.year ? candidateParts.month : 12);
+      month += 1
+    ) {
+      const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      const firstDay =
+        year === startParts.year && month === startParts.month ? startParts.day : 1;
+      const endDay =
+        year === candidateParts.year && month === candidateParts.month
+          ? candidateParts.day
+          : lastDay;
+
+      for (let day = firstDay; day <= endDay; day += 1) {
+        if (doesDateMatchFallbackRRule({ day, month, year }, startParts, rrule)) {
+          count += 1;
+        }
+      }
+    }
+  }
+
+  return count;
+}
+
+function expandFallbackRecurringEvent(
+  event: FallbackEvent,
+  events: FallbackEvent[],
+  fallbackId: string,
+  month: number,
+  year: number,
+): CalendarEvent[] {
+  if (!event.start || !event.rrule) {
+    return [];
+  }
+
+  const rrule = parseFallbackRRule(event.rrule);
+  const startParts = getDateParts(event.start);
+  const end = isValidDate(event.end) ? event.end : event.start;
+  const duration = end.getTime() - event.start.getTime();
+  const timeParts = event.allDay
+    ? { hour: 0, minute: 0, second: 0 }
+    : getTimeParts(event.start);
+  const until = rrule.UNTIL
+    ? parseIcsDate(rrule.UNTIL, event.allDay, event.start.tz)
+    : undefined;
+  const countLimit = rrule.COUNT ? Number.parseInt(rrule.COUNT, 10) : undefined;
+  const occurrences: CalendarEvent[] = [];
+
+  for (
+    let date = new Date(Date.UTC(year, month - 1, -1));
+    date <= new Date(Date.UTC(year, month, 2));
+    date.setUTCDate(date.getUTCDate() + 1)
+  ) {
+    const dateParts = {
+      day: date.getUTCDate(),
+      month: date.getUTCMonth() + 1,
+      year: date.getUTCFullYear(),
+    };
+
+    if (!doesDateMatchFallbackRRule(dateParts, startParts, rrule)) {
+      continue;
+    }
+
+    if (
+      countLimit &&
+      getFallbackOccurrenceCount(event, dateParts, rrule) > countLimit
+    ) {
+      continue;
+    }
+
+    const occurrenceStart = createFallbackOccurrenceDate(
+      dateParts,
+      timeParts,
+      event.allDay,
+      event.start.tz,
+    );
+
+    if (
+      (until && occurrenceStart.getTime() > until.getTime()) ||
+      isFallbackExcluded(event, occurrenceStart) ||
+      isFallbackOverridden(event, occurrenceStart, events)
+    ) {
+      continue;
+    }
+
+    const occurrenceEnd = new Date(
+      occurrenceStart.getTime() + duration,
+    ) as DateWithTimeZone;
+    if (event.allDay) {
+      occurrenceEnd.dateOnly = true;
+    }
+    occurrenceEnd.tz = end.tz;
+
+    if (
+      !doesEventOverlapMonth(
+        occurrenceStart,
+        occurrenceEnd,
+        event.allDay,
+        month,
+        year,
+      )
+    ) {
+      continue;
+    }
+
+    const normalizedEvent = normalizeFallbackEvent(
+      { ...event, start: occurrenceStart, end: occurrenceEnd },
+      `${fallbackId}-${occurrenceStart.toISOString()}`,
+    );
+
+    if (normalizedEvent) {
+      occurrences.push(normalizedEvent);
+    }
+  }
+
+  return occurrences;
 }
 
 function parseFallbackIcsEvents(
@@ -691,7 +981,7 @@ function parseFallbackIcsEvents(
   month: number,
   year: number,
 ): CalendarEvent[] {
-  const events: CalendarEvent[] = [];
+  const parsedEvents: FallbackEvent[] = [];
   let currentEvent: FallbackEvent | null = null;
 
   for (const line of unfoldIcsLines(icsText)) {
@@ -702,24 +992,7 @@ function parseFallbackIcsEvents(
 
     if (line === "END:VEVENT") {
       if (currentEvent?.start) {
-        if (
-          doesEventOverlapMonth(
-            currentEvent.start,
-            isValidDate(currentEvent.end) ? currentEvent.end : currentEvent.start,
-            currentEvent.allDay,
-            month,
-            year,
-          )
-        ) {
-          const event = normalizeFallbackEvent(
-            currentEvent,
-            `fallback-${events.length + 1}`,
-          );
-
-          if (event) {
-            events.push(event);
-          }
-        }
+        parsedEvents.push(currentEvent);
       }
 
       currentEvent = null;
@@ -740,6 +1013,9 @@ function parseFallbackIcsEvents(
     const value = line.slice(separatorIndex + 1);
     const [name, ...params] = rawName.split(";");
     const allDay = params.some((param) => param.toUpperCase() === "VALUE=DATE");
+    const timeZone = params
+      .find((param) => param.toUpperCase().startsWith("TZID="))
+      ?.slice("TZID=".length);
 
     switch (name.toUpperCase()) {
       case "UID":
@@ -756,17 +1032,58 @@ function parseFallbackIcsEvents(
         break;
       case "DTSTART":
         currentEvent.allDay = allDay;
-        currentEvent.start = parseIcsDate(value, allDay);
+        currentEvent.start = parseIcsDate(value, allDay, timeZone);
         break;
       case "DTEND":
-        currentEvent.end = parseIcsDate(value, allDay);
+        currentEvent.end = parseIcsDate(value, allDay, timeZone);
+        break;
+      case "EXDATE":
+        currentEvent.exdates = [
+          ...(currentEvent.exdates ?? []),
+          ...value
+            .split(",")
+            .map((dateValue) => parseIcsDate(dateValue, allDay, timeZone))
+            .filter((date): date is DateWithTimeZone => date !== undefined),
+        ];
+        break;
+      case "RECURRENCE-ID":
+        currentEvent.recurrenceId = parseIcsDate(value, allDay, timeZone);
+        break;
+      case "RRULE":
+        currentEvent.rrule = value;
         break;
     }
   }
 
-  return events.sort(
-    compareCalendarEvents,
-  );
+  return dedupeCalendarEvents(
+    parsedEvents.flatMap((event, index) => {
+      if (event.rrule) {
+        return expandFallbackRecurringEvent(
+          event,
+          parsedEvents,
+          `fallback-${index + 1}`,
+          month,
+          year,
+        );
+      }
+
+      if (
+        !event.start ||
+        !doesEventOverlapMonth(
+          event.start,
+          isValidDate(event.end) ? event.end : event.start,
+          event.allDay,
+          month,
+          year,
+        )
+      ) {
+        return [];
+      }
+
+      const normalizedEvent = normalizeFallbackEvent(event, `fallback-${index + 1}`);
+      return normalizedEvent ? [normalizedEvent] : [];
+    }),
+  ).sort(compareCalendarEvents);
 }
 
 function countFallbackEventsWithStart(icsText: string): number {
@@ -818,7 +1135,7 @@ function normalizeParsedCalendar(
   month: number,
   year: number,
 ): CalendarEvent[] {
-  return Object.entries(calendar)
+  return dedupeCalendarEvents(Object.entries(calendar)
     .filter((entry): entry is [string, VEvent] => isVEvent(entry[1]))
     .flatMap(([id, event]) => {
       if (isRecurringVEvent(event)) {
@@ -831,30 +1148,7 @@ function normalizeParsedCalendar(
 
       return [normalizeEvent(event, id)];
     })
-    .filter((event): event is CalendarEvent => event !== null)
-    .filter((event, index, events) => {
-      const eventKey = [
-        event.title,
-        event.start,
-        event.end,
-        event.allDay ? "all-day" : "timed",
-        event.displayTime ?? "",
-        event.location ?? "",
-      ].join("|");
-
-      return (
-        events.findIndex((candidateEvent) =>
-          [
-            candidateEvent.title,
-            candidateEvent.start,
-            candidateEvent.end,
-            candidateEvent.allDay ? "all-day" : "timed",
-            candidateEvent.displayTime ?? "",
-            candidateEvent.location ?? "",
-          ].join("|") === eventKey,
-        ) === index
-      );
-    })
+    .filter((event): event is CalendarEvent => event !== null))
     .sort(compareCalendarEvents);
 }
 
@@ -879,9 +1173,7 @@ export async function parseCalendarEventsWithDiagnostics(
   let events: CalendarEvent[];
 
   try {
-    const { createRequire } = await import("node:module");
-    const nodeRequire = createRequire(`${process.cwd()}/package.json`);
-    const ical = nodeRequire(["node", "ical"].join("-")) as typeof import("node-ical");
+    const ical = await import("node-ical");
     const calendar = ical.parseICS(icsText) as CalendarResponse;
     events = normalizeParsedCalendar(calendar, month, year);
   } catch (error) {
