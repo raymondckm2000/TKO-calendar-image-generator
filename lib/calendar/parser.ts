@@ -689,6 +689,29 @@ function normalizeParsedCalendar(
       return [normalizeEvent(event, id)];
     })
     .filter((event): event is CalendarEvent => event !== null)
+    .filter((event, index, events) => {
+      const eventKey = [
+        event.title,
+        event.start,
+        event.end,
+        event.allDay ? "all-day" : "timed",
+        event.displayTime ?? "",
+        event.location ?? "",
+      ].join("|");
+
+      return (
+        events.findIndex((candidateEvent) =>
+          [
+            candidateEvent.title,
+            candidateEvent.start,
+            candidateEvent.end,
+            candidateEvent.allDay ? "all-day" : "timed",
+            candidateEvent.displayTime ?? "",
+            candidateEvent.location ?? "",
+          ].join("|") === eventKey,
+        ) === index
+      );
+    })
     .sort(compareCalendarEvents);
 }
 

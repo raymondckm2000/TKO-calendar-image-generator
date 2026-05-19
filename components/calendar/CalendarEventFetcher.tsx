@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
 import { en } from "@/lib/i18n/en";
 
 interface NormalizedEvent {
@@ -62,7 +63,7 @@ function getSavedForm(): SavedForm {
 export function CalendarEventFetcher() {
   const strings = en.calendarFetcher;
   const [calendarLink, setCalendarLink] = useState(
-    () => getSavedForm().calendarLink ?? "",
+    () => getSavedForm().calendarLink || DEFAULT_ICS_URL,
   );
   const [year, setYear] = useState(() => getSavedForm().year ?? getDefaultYear());
   const [month, setMonth] = useState(
