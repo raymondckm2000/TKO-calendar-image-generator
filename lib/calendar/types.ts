@@ -9,3 +9,15 @@ export interface CalendarEvent {
   multiDay?: boolean;
   displayTime?: string;
 }
+
+export interface FormattedCalendarEvent {
+  dateLabel: string;
+  startDate: string;
+  endDate: string;
+  title: string;
+  timeLabel: string;
+  location: string;
+  displayText: string;
+  allDay: boolean;
+  multiDay: boolean;
+}
