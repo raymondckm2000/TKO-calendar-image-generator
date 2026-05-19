@@ -1,0 +1,36 @@
+export const en = {
+  calendarFetcher: {
+    title: "TKO Calendar Fetcher",
+    subtitle: "Fetch public Google Calendar events and format them for review.",
+    calendarLinkLabel: "Google Calendar link",
+    calendarLinkPlaceholder:
+      "https://calendar.google.com/calendar/ical/.../public/basic.ics",
+    yearLabel: "Year",
+    monthLabel: "Month",
+    fetchButton: "Fetch events",
+    fetchingButton: "Fetching...",
+    summaryLabel: "Summary",
+    formattedTextLabel: "Formatted text",
+    copyButton: "Copy",
+    copiedButton: "Copied",
+    jsonLabel: "Normalized event JSON",
+    emptyFormattedText: "Formatted event text will appear here.",
+    emptyJson: "Normalized event JSON will appear here.",
+    errorMessage:
+      "Unable to read calendar. Please confirm the calendar is public and the link is correct.",
+    months: [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ],
+  },
+} as const;

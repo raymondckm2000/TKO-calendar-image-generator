@@ -6,9 +6,10 @@ import type {
 } from "node-ical";
 
 import { CALENDAR_TIME_ZONE } from "./constants";
-import type { CalendarEvent } from "./types";
+import type { CalendarEvent, FormattedCalendarEvent } from "./types";
 
 type DateParts = {
+  day: number;
   month: number;
   year: number;
 };
@@ -30,6 +31,48 @@ const ICS_CONTENT_TYPES = [
   "application/octet-stream",
   "text/plain",
 ];
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+function getMonthName(month: number): string {
+  return MONTH_NAMES[month - 1] || `Month ${month}`;
+}
+
+export function resolveCalendarIcsUrl(calendarLink: string): string {
+  const trimmedLink = calendarLink.trim();
+
+  if (!trimmedLink) {
+    throw new Error("Calendar link is required.");
+  }
+
+  const parsedUrl = new URL(trimmedLink);
+
+  if (parsedUrl.pathname.includes("/calendar/embed")) {
+    const source = parsedUrl.searchParams.get("src");
+
+    if (!source) {
+      throw new Error("Google Calendar embed link is missing the src parameter.");
+    }
+
+    return `https://calendar.google.com/calendar/ical/${encodeURIComponent(
+      source,
+    )}/public/basic.ics`;
+  }
+
+  return trimmedLink;
+}
 
 async function fetchIcsText(url: string): Promise<string> {
   let response: Response;
@@ -115,6 +158,7 @@ function isVEvent(component: unknown): component is VEvent {
 function getDateParts(date: DateWithTimeZone): DateParts {
   if (date.dateOnly || !date.tz) {
     return {
+      day: date.getUTCDate(),
       month: date.getUTCMonth() + 1,
       year: date.getUTCFullYear(),
     };
@@ -122,30 +166,42 @@ function getDateParts(date: DateWithTimeZone): DateParts {
 
   try {
     const parts = new Intl.DateTimeFormat("en-US", {
+      day: "numeric",
       month: "numeric",
       timeZone: date.tz,
       year: "numeric",
     }).formatToParts(date);
 
+    const dayPart = parts.find((part) => part.type === "day")?.value;
     const monthPart = parts.find((part) => part.type === "month")?.value;
     const yearPart = parts.find((part) => part.type === "year")?.value;
+    const day = dayPart ? Number.parseInt(dayPart, 10) : NaN;
     const month = monthPart ? Number.parseInt(monthPart, 10) : NaN;
     const year = yearPart ? Number.parseInt(yearPart, 10) : NaN;
 
-    if (Number.isInteger(month) && Number.isInteger(year)) {
-      return { month, year };
+    if (Number.isInteger(day) && Number.isInteger(month) && Number.isInteger(year)) {
+      return { day, month, year };
     }
   } catch {
     // Fall back to UTC if an ICS timezone identifier is not supported.
   }
 
   return {
+    day: date.getUTCDate(),
     month: date.getUTCMonth() + 1,
     year: date.getUTCFullYear(),
   };
 }
 
 function formatDateKey(date: Date): string {
+  if ("dateOnly" in date && date.dateOnly) {
+    return [
+      date.getUTCFullYear(),
+      String(date.getUTCMonth() + 1).padStart(2, "0"),
+      String(date.getUTCDate()).padStart(2, "0"),
+    ].join("-");
+  }
+
   const parts = new Intl.DateTimeFormat("en-CA", {
     day: "2-digit",
     month: "2-digit",
@@ -160,6 +216,14 @@ function formatDateKey(date: Date): string {
   };
 
   return `${datePart.year}-${datePart.month}-${datePart.day}`;
+}
+
+function createDateKey(parts: DateParts): string {
+  return [
+    parts.year,
+    String(parts.month).padStart(2, "0"),
+    String(parts.day).padStart(2, "0"),
+  ].join("-");
 }
 
 function formatDisplayTime(start: DateWithTimeZone, allDay: boolean): string | undefined {
@@ -186,10 +250,83 @@ function isMultiDayEvent(
 ): boolean {
   const displayEnd =
     allDay && end.getTime() > start.getTime()
-      ? new Date(end.getTime() - 1) as DateWithTimeZone
+      ? subtractOneUtcDay(end)
       : end;
 
   return formatDateKey(start) !== formatDateKey(displayEnd);
+}
+
+function subtractOneUtcDay(date: DateWithTimeZone): DateWithTimeZone {
+  const adjustedDate = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - 1),
+  ) as DateWithTimeZone;
+  adjustedDate.dateOnly = date.dateOnly;
+  return adjustedDate;
+}
+
+function getDisplayEndDate(
+  start: DateWithTimeZone,
+  end: DateWithTimeZone,
+  allDay: boolean,
+): DateWithTimeZone {
+  if (allDay && end.getTime() > start.getTime()) {
+    return subtractOneUtcDay(end);
+  }
+
+  return end;
+}
+
+function doesEventOverlapMonth(
+  start: DateWithTimeZone,
+  end: DateWithTimeZone,
+  allDay: boolean,
+  month: number,
+  year: number,
+): boolean {
+  const displayStartKey = createDateKey(getDateParts(start));
+  const displayEndKey = createDateKey(getDateParts(getDisplayEndDate(start, end, allDay)));
+  const monthStartKey = `${year}-${String(month).padStart(2, "0")}-01`;
+  const monthEndKey = `${year}-${String(month).padStart(2, "0")}-${String(
+    new Date(Date.UTC(year, month, 0)).getUTCDate(),
+  ).padStart(2, "0")}`;
+
+  return displayStartKey <= monthEndKey && displayEndKey >= monthStartKey;
+}
+
+function compareCalendarEvents(
+  firstEvent: CalendarEvent,
+  secondEvent: CalendarEvent,
+): number {
+  const firstStart = new Date(firstEvent.start) as DateWithTimeZone;
+  const secondStart = new Date(secondEvent.start) as DateWithTimeZone;
+
+  if (firstEvent.allDay) {
+    firstStart.dateOnly = true;
+  }
+
+  if (secondEvent.allDay) {
+    secondStart.dateOnly = true;
+  }
+
+  const firstDateKey = createDateKey(getDateParts(firstStart));
+  const secondDateKey = createDateKey(getDateParts(secondStart));
+
+  if (firstDateKey !== secondDateKey) {
+    return firstDateKey.localeCompare(secondDateKey);
+  }
+
+  if (firstEvent.allDay !== secondEvent.allDay) {
+    return firstEvent.allDay ? -1 : 1;
+  }
+
+  const firstStartTime = Date.parse(firstEvent.start);
+  const secondStartTime = Date.parse(secondEvent.start);
+
+  if (firstStartTime !== secondStartTime) {
+    return firstStartTime - secondStartTime;
+  }
+
+  return firstEvent.title.localeCompare(secondEvent.title);
 }
 
 function isEventInMonth(event: VEvent, month: number, year: number): boolean {
@@ -197,8 +334,14 @@ function isEventInMonth(event: VEvent, month: number, year: number): boolean {
     return false;
   }
 
-  const dateParts = getDateParts(event.start);
-  return dateParts.month === month && dateParts.year === year;
+  const end = isValidDate(event.end) ? event.end : event.start;
+  return doesEventOverlapMonth(
+    event.start,
+    end,
+    Boolean(event.start.dateOnly || event.datetype === "date"),
+    month,
+    year,
+  );
 }
 
 function normalizeEvent(event: VEvent, fallbackId: string): CalendarEvent | null {
@@ -336,9 +479,15 @@ function parseFallbackIcsEvents(
 
     if (line === "END:VEVENT") {
       if (currentEvent?.start) {
-        const dateParts = getDateParts(currentEvent.start);
-
-        if (dateParts.month === month && dateParts.year === year) {
+        if (
+          doesEventOverlapMonth(
+            currentEvent.start,
+            isValidDate(currentEvent.end) ? currentEvent.end : currentEvent.start,
+            currentEvent.allDay,
+            month,
+            year,
+          )
+        ) {
           const event = normalizeFallbackEvent(
             currentEvent,
             `fallback-${events.length + 1}`,
@@ -393,8 +542,7 @@ function parseFallbackIcsEvents(
   }
 
   return events.sort(
-    (firstEvent, secondEvent) =>
-      Date.parse(firstEvent.start) - Date.parse(secondEvent.start),
+    compareCalendarEvents,
   );
 }
 
@@ -408,10 +556,7 @@ function normalizeParsedCalendar(
     .filter(([, event]) => isEventInMonth(event, month, year))
     .map(([id, event]) => normalizeEvent(event, id))
     .filter((event): event is CalendarEvent => event !== null)
-    .sort(
-      (firstEvent, secondEvent) =>
-        Date.parse(firstEvent.start) - Date.parse(secondEvent.start),
-    );
+    .sort(compareCalendarEvents);
 }
 
 export async function parseCalendarEvents(
@@ -431,4 +576,78 @@ export async function parseCalendarEvents(
     console.warn("node-ical parseICS failed; using ICS fallback parser.", error);
     return parseFallbackIcsEvents(icsText, month, year);
   }
+}
+
+function formatDateLabel(startDate: string, endDate: string): string {
+  const [, startMonth, startDay] = startDate.split("-").map(Number);
+  const [, endMonth, endDay] = endDate.split("-").map(Number);
+
+  if (startDate === endDate) {
+    return `${startDay}/${startMonth}`;
+  }
+
+  if (startMonth === endMonth) {
+    return `${startDay}-${endDay}/${startMonth}`;
+  }
+
+  return `${startDay}/${startMonth}-${endDay}/${endMonth}`;
+}
+
+function shouldShowLocation(title: string, location: string): boolean {
+  return Boolean(location) && !title.includes(location);
+}
+
+function toFormattedCalendarEvent(event: CalendarEvent): FormattedCalendarEvent {
+  const start = new Date(event.start) as DateWithTimeZone;
+  const end = new Date(event.end) as DateWithTimeZone;
+
+  if (event.allDay) {
+    start.dateOnly = true;
+    end.dateOnly = true;
+  }
+
+  const displayEnd = getDisplayEndDate(start, end, event.allDay);
+  const startDate = createDateKey(getDateParts(start));
+  const endDate = createDateKey(getDateParts(displayEnd));
+  const title = event.title.trim();
+  const location = event.location?.trim() ?? "";
+  const displayLocation = shouldShowLocation(title, location) ? location : "";
+  const timeLabel = event.displayTime ?? "";
+  const dateLabel = formatDateLabel(startDate, endDate);
+  const displayText = [dateLabel, title, timeLabel, displayLocation]
+    .filter(Boolean)
+    .join(" ");
+
+  return {
+    dateLabel,
+    startDate,
+    endDate,
+    title,
+    timeLabel,
+    location: displayLocation,
+    displayText,
+    allDay: event.allDay,
+    multiDay: startDate !== endDate,
+  };
+}
+
+export function formatCalendarEvents(
+  events: CalendarEvent[],
+  month: number,
+  year: number,
+): {
+  formattedText: string;
+  normalizedEvents: FormattedCalendarEvent[];
+  summary: string;
+} {
+  const normalizedEvents = events.map(toFormattedCalendarEvent);
+
+  return {
+    formattedText: normalizedEvents.map((event) => event.displayText).join("\n"),
+    normalizedEvents,
+    summary:
+      normalizedEvents.length > 0
+        ? `${normalizedEvents.length} events found for ${getMonthName(month)} ${year}`
+        : "No events found for selected month.",
+  };
 }

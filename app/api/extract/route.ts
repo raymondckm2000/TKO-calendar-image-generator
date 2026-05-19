@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
-import { parseCalendarEvents } from "@/lib/calendar/parser";
+import {
+  formatCalendarEvents,
+  parseCalendarEvents,
+  resolveCalendarIcsUrl,
+} from "@/lib/calendar/parser";
 
 export const runtime = "nodejs";
 
-function parseIntegerParam(value: string | null): number | null {
-  if (!value || !/^\d+$/.test(value)) {
+function parseIntegerParam(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) ? value : null;
+  }
+
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
     return null;
   }
 
@@ -22,18 +30,12 @@ function isValidYear(year: number): boolean {
   return year >= 1 && year <= 9999;
 }
 
-function serializeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.stack || error.message;
-  }
-
-  return String(error);
-}
-
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const month = parseIntegerParam(searchParams.get("month"));
-  const year = parseIntegerParam(searchParams.get("year"));
+async function handleCalendarRequest(input: {
+  calendarLink?: string | null;
+  month: number | null;
+  year: number | null;
+}) {
+  const { calendarLink, month, year } = input;
 
   if (month === null || year === null) {
     return NextResponse.json(
@@ -50,25 +52,58 @@ export async function GET(request: Request) {
   }
 
   try {
-    const url = searchParams.get("url") || DEFAULT_ICS_URL;
+    const url = resolveCalendarIcsUrl(calendarLink || DEFAULT_ICS_URL);
     const events = await parseCalendarEvents(url, month, year);
+    const formattedResult = formatCalendarEvents(events, month, year);
 
     return NextResponse.json({
       success: true,
-      count: events.length,
-      events,
+      ...formattedResult,
     });
   } catch (error) {
-    const details = serializeError(error);
     console.error("Calendar extraction failed:", error);
 
     return NextResponse.json(
       {
         success: false,
-        error: "Failed to parse calendar events.",
-        details,
+        error:
+          "Unable to read calendar. Please confirm the calendar is public and the link is correct.",
       },
       { status: 500 },
     );
   }
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const month = parseIntegerParam(searchParams.get("month"));
+  const year = parseIntegerParam(searchParams.get("year"));
+
+  return handleCalendarRequest({
+    calendarLink: searchParams.get("calendarLink") || searchParams.get("url"),
+    month,
+    year,
+  });
+}
+
+export async function POST(request: Request) {
+  let body: { calendarLink?: string; month?: unknown; year?: unknown };
+
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: "Invalid request body." },
+      { status: 400 },
+    );
+  }
+
+  const month = parseIntegerParam(body.month);
+  const year = parseIntegerParam(body.year);
+
+  return handleCalendarRequest({
+    calendarLink: body.calendarLink,
+    month,
+    year,
+  });
 }
