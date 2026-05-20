@@ -816,6 +816,17 @@ function doesDateMatchFallbackRRule(
       : parts.day === startParts.day;
   }
 
+  if (rrule.FREQ === "YEARLY") {
+    const monthMatches = rrule.BYMONTH
+      ? rrule.BYMONTH.split(",").includes(String(parts.month))
+      : parts.month === startParts.month;
+    const dayMatches = rrule.BYMONTHDAY
+      ? rrule.BYMONTHDAY.split(",").includes(String(parts.day))
+      : parts.day === startParts.day;
+
+    return monthMatches && dayMatches;
+  }
+
   return false;
 }
 
