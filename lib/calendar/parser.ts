@@ -4,6 +4,7 @@ import type {
   ParameterValue,
   VEvent,
 } from "node-ical";
+import ical from "node-ical";
 
 import { CALENDAR_TIME_ZONE } from "./constants";
 import type { CalendarEvent, FormattedCalendarEvent } from "./types";
@@ -879,9 +880,6 @@ export async function parseCalendarEventsWithDiagnostics(
   let events: CalendarEvent[];
 
   try {
-    const { createRequire } = await import("node:module");
-    const nodeRequire = createRequire(`${process.cwd()}/package.json`);
-    const ical = nodeRequire(["node", "ical"].join("-")) as typeof import("node-ical");
     const calendar = ical.parseICS(icsText) as CalendarResponse;
     events = normalizeParsedCalendar(calendar, month, year);
   } catch (error) {
