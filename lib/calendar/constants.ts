@@ -1,4 +1,7 @@
-export const DEFAULT_ICS_URL =
-  "https://calendar.google.com/calendar/ical/6cq5boqnnjp23j95rn54o95o5o%40group.calendar.google.com/public/basic.ics";
+import { CALENDAR_SOURCES, CALENDAR_SOURCE_IDS } from "@/lib/calendar/sources";
+
+export const DEFAULT_ICS_URL = CALENDAR_SOURCES.find(
+  (source) => source.id === CALENDAR_SOURCE_IDS.tko,
+)!.url;
 
 export const CALENDAR_TIME_ZONE = "Asia/Hong_Kong";
