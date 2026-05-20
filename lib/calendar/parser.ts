@@ -24,6 +24,45 @@ type FallbackEvent = {
   allDay: boolean;
 };
 
+export type CalendarSourceStatus =
+  | "parsed"
+  | "fetch_failed"
+  | "invalid_feed"
+  | "no_events_in_feed"
+  | "parser_failed"
+  | "no_events_for_selected_month";
+
+export type CalendarSourceDiagnostics = {
+  bodyPreview: string;
+  contentType: string;
+  filteredEventCount: number;
+  hasVCalendar: boolean;
+  hasVEvent: boolean;
+  httpStatus: number | null;
+  rawEventCount: number;
+  sourceStatus: CalendarSourceStatus;
+};
+
+export class CalendarSourceError extends Error {
+  diagnostics: CalendarSourceDiagnostics;
+  sourceStatus: CalendarSourceStatus;
+
+  constructor(
+    message: string,
+    sourceStatus: CalendarSourceStatus,
+    diagnostics: Partial<CalendarSourceDiagnostics> = {},
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "CalendarSourceError";
+    this.sourceStatus = sourceStatus;
+    this.diagnostics = createSourceDiagnostics({
+      ...diagnostics,
+      sourceStatus,
+    });
+  }
+}
+
 type RecurringVEvent = VEvent & {
   exdate?: Record<string, Date>;
   recurrences?: Record<string, VEvent>;
@@ -58,6 +97,21 @@ function getMonthName(month: number): string {
   return MONTH_NAMES[month - 1] || `Month ${month}`;
 }
 
+function createSourceDiagnostics(
+  diagnostics: Partial<CalendarSourceDiagnostics>,
+): CalendarSourceDiagnostics {
+  return {
+    bodyPreview: diagnostics.bodyPreview ?? "",
+    contentType: diagnostics.contentType ?? "",
+    filteredEventCount: diagnostics.filteredEventCount ?? 0,
+    hasVCalendar: diagnostics.hasVCalendar ?? false,
+    hasVEvent: diagnostics.hasVEvent ?? false,
+    httpStatus: diagnostics.httpStatus ?? null,
+    rawEventCount: diagnostics.rawEventCount ?? 0,
+    sourceStatus: diagnostics.sourceStatus ?? "fetch_failed",
+  };
+}
+
 export function resolveCalendarIcsUrl(calendarLink: string): string {
   const trimmedLink = calendarLink.trim();
 
@@ -82,7 +136,14 @@ export function resolveCalendarIcsUrl(calendarLink: string): string {
   return trimmedLink;
 }
 
-async function fetchIcsText(url: string): Promise<string> {
+function countRawVEvents(icsText: string): number {
+  return unfoldIcsLines(icsText).filter((line) => line === "BEGIN:VEVENT").length;
+}
+
+async function fetchIcsText(url: string): Promise<{
+  diagnostics: CalendarSourceDiagnostics;
+  icsText: string;
+}> {
   let response: Response;
 
   try {
@@ -94,23 +155,39 @@ async function fetchIcsText(url: string): Promise<string> {
       redirect: "follow",
     });
   } catch (error) {
-    throw new Error(
+    throw new CalendarSourceError(
       `Failed to fetch ICS feed: ${getErrorMessage(error)}`,
-      { cause: error },
+      "fetch_failed",
+      {},
+      error,
     );
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   const responseText = await response.text();
+  const baseDiagnostics = createSourceDiagnostics({
+    bodyPreview: responseText.slice(0, MAX_ERROR_BODY_LENGTH),
+    contentType,
+    hasVCalendar: responseText.includes("BEGIN:VCALENDAR"),
+    hasVEvent: responseText.includes("BEGIN:VEVENT"),
+    httpStatus: response.status,
+    rawEventCount: countRawVEvents(responseText),
+  });
 
   if (!response.ok) {
-    throw new Error(
+    throw new CalendarSourceError(
       `ICS feed request failed with HTTP ${response.status} ${response.statusText}: ${responseText.slice(0, MAX_ERROR_BODY_LENGTH)}`,
+      "fetch_failed",
+      baseDiagnostics,
     );
   }
 
   if (!responseText.trim()) {
-    throw new Error("ICS feed response was empty.");
+    throw new CalendarSourceError(
+      "ICS feed response was empty.",
+      "invalid_feed",
+      baseDiagnostics,
+    );
   }
 
   if (
@@ -119,14 +196,36 @@ async function fetchIcsText(url: string): Promise<string> {
       contentType.toLowerCase().includes(allowedType),
     )
   ) {
-    throw new Error(`ICS feed returned unsupported content type: ${contentType}.`);
+    throw new CalendarSourceError(
+      `ICS feed returned unsupported content type: ${contentType}.`,
+      "invalid_feed",
+      baseDiagnostics,
+    );
   }
 
   if (!responseText.includes("BEGIN:VCALENDAR")) {
-    throw new Error("ICS feed response did not contain BEGIN:VCALENDAR.");
+    throw new CalendarSourceError(
+      "ICS feed response did not contain BEGIN:VCALENDAR.",
+      "invalid_feed",
+      baseDiagnostics,
+    );
   }
 
-  return responseText;
+  if (!responseText.includes("BEGIN:VEVENT")) {
+    throw new CalendarSourceError(
+      "Calendar was read, but no events were found in the feed.",
+      "no_events_in_feed",
+      {
+        ...baseDiagnostics,
+        sourceStatus: "no_events_in_feed",
+      },
+    );
+  }
+
+  return {
+    diagnostics: baseDiagnostics,
+    icsText: responseText,
+  };
 }
 
 function getErrorMessage(error: unknown): string {
@@ -670,6 +769,50 @@ function parseFallbackIcsEvents(
   );
 }
 
+function countFallbackEventsWithStart(icsText: string): number {
+  let count = 0;
+  let currentEvent: FallbackEvent | null = null;
+
+  for (const line of unfoldIcsLines(icsText)) {
+    if (line === "BEGIN:VEVENT") {
+      currentEvent = { allDay: false };
+      continue;
+    }
+
+    if (line === "END:VEVENT") {
+      if (currentEvent?.start) {
+        count += 1;
+      }
+
+      currentEvent = null;
+      continue;
+    }
+
+    if (!currentEvent) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const rawName = line.slice(0, separatorIndex);
+    const value = line.slice(separatorIndex + 1);
+    const [name, ...params] = rawName.split(";");
+
+    if (name.toUpperCase() !== "DTSTART") {
+      continue;
+    }
+
+    const allDay = params.some((param) => param.toUpperCase() === "VALUE=DATE");
+    currentEvent.start = parseIcsDate(value, allDay);
+  }
+
+  return count;
+}
+
 function normalizeParsedCalendar(
   calendar: CalendarResponse,
   month: number,
@@ -720,18 +863,58 @@ export async function parseCalendarEvents(
   month: number,
   year: number,
 ): Promise<CalendarEvent[]> {
-  const icsText = await fetchIcsText(url);
+  const result = await parseCalendarEventsWithDiagnostics(url, month, year);
+  return result.events;
+}
+
+export async function parseCalendarEventsWithDiagnostics(
+  url: string,
+  month: number,
+  year: number,
+): Promise<{
+  diagnostics: CalendarSourceDiagnostics;
+  events: CalendarEvent[];
+}> {
+  const { diagnostics, icsText } = await fetchIcsText(url);
+  let events: CalendarEvent[];
 
   try {
     const { createRequire } = await import("node:module");
     const nodeRequire = createRequire(`${process.cwd()}/package.json`);
     const ical = nodeRequire(["node", "ical"].join("-")) as typeof import("node-ical");
     const calendar = ical.parseICS(icsText) as CalendarResponse;
-    return normalizeParsedCalendar(calendar, month, year);
+    events = normalizeParsedCalendar(calendar, month, year);
   } catch (error) {
     console.warn("node-ical parseICS failed; using ICS fallback parser.", error);
-    return parseFallbackIcsEvents(icsText, month, year);
+    events = parseFallbackIcsEvents(icsText, month, year);
+
+    if (diagnostics.rawEventCount > 0 && countFallbackEventsWithStart(icsText) === 0) {
+      const parserFailedDiagnostics = createSourceDiagnostics({
+        ...diagnostics,
+        filteredEventCount: 0,
+        sourceStatus: "parser_failed",
+      });
+
+      throw new CalendarSourceError(
+        "Calendar was read, but events could not be extracted from the feed.",
+        "parser_failed",
+        parserFailedDiagnostics,
+        error,
+      );
+    }
   }
+
+  const sourceStatus =
+    events.length > 0 ? "parsed" : "no_events_for_selected_month";
+
+  return {
+    diagnostics: createSourceDiagnostics({
+      ...diagnostics,
+      filteredEventCount: events.length,
+      sourceStatus,
+    }),
+    events,
+  };
 }
 
 function formatDateLabel(startDate: string, endDate: string): string {

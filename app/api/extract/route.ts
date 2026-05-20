@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 
 import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
 import {
+  CalendarSourceError,
   formatCalendarEvents,
-  parseCalendarEvents,
+  parseCalendarEventsWithDiagnostics,
   resolveCalendarIcsUrl,
 } from "@/lib/calendar/parser";
 
@@ -30,6 +31,22 @@ function isValidYear(year: number): boolean {
   return year >= 1 && year <= 9999;
 }
 
+function getCalendarSourceErrorMessage(error: CalendarSourceError): string {
+  if (error.sourceStatus === "no_events_in_feed") {
+    return "Calendar was read, but no events were found in the feed.";
+  }
+
+  if (error.sourceStatus === "parser_failed") {
+    return "Calendar was read, but events could not be extracted from the feed.";
+  }
+
+  if (error.sourceStatus === "invalid_feed") {
+    return "Calendar feed could not be read as a valid ICS calendar.";
+  }
+
+  return "Unable to read calendar. Please confirm the calendar is public and the link is correct.";
+}
+
 async function handleCalendarRequest(input: {
   calendarLink?: string | null;
   month: number | null;
@@ -53,15 +70,39 @@ async function handleCalendarRequest(input: {
 
   try {
     const url = resolveCalendarIcsUrl(calendarLink || DEFAULT_ICS_URL);
-    const events = await parseCalendarEvents(url, month, year);
+    const { diagnostics, events } = await parseCalendarEventsWithDiagnostics(
+      url,
+      month,
+      year,
+    );
     const formattedResult = formatCalendarEvents(events, month, year);
+
+    console.info("Calendar source diagnostics:", diagnostics);
 
     return NextResponse.json({
       success: true,
+      sourceStatus: diagnostics.sourceStatus,
+      rawEventCount: diagnostics.rawEventCount,
+      filteredEventCount: diagnostics.filteredEventCount,
       ...formattedResult,
     });
   } catch (error) {
     console.error("Calendar extraction failed:", error);
+
+    if (error instanceof CalendarSourceError) {
+      console.info("Calendar source diagnostics:", error.diagnostics);
+
+      return NextResponse.json(
+        {
+          success: false,
+          sourceStatus: error.sourceStatus,
+          rawEventCount: error.diagnostics.rawEventCount,
+          filteredEventCount: error.diagnostics.filteredEventCount,
+          error: getCalendarSourceErrorMessage(error),
+        },
+        { status: error.sourceStatus === "fetch_failed" ? 502 : 422 },
+      );
+    }
 
     return NextResponse.json(
       {

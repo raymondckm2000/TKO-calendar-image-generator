@@ -19,9 +19,12 @@ interface NormalizedEvent {
 
 interface ExtractResponse {
   success: boolean;
+  filteredEventCount?: number;
   summary?: string;
   formattedText?: string;
   normalizedEvents?: NormalizedEvent[];
+  rawEventCount?: number;
+  sourceStatus?: string;
   error?: string;
 }
 
@@ -115,12 +118,21 @@ export function CalendarEventFetcher() {
         throw new Error(data.error || strings.errorMessage);
       }
 
+      console.info("Calendar source diagnostics:", {
+        filteredEventCount: data.filteredEventCount,
+        rawEventCount: data.rawEventCount,
+        sourceStatus: data.sourceStatus,
+      });
       setSummary(data.summary ?? "");
       setFormattedText(data.formattedText ?? "");
       setNormalizedEvents(data.normalizedEvents ?? []);
     } catch (fetchError) {
       console.error("Calendar fetch failed:", fetchError);
-      setError(strings.errorMessage);
+      setError(
+        fetchError instanceof Error && fetchError.message
+          ? fetchError.message
+          : strings.errorMessage,
+      );
       setSummary("");
       setFormattedText("");
       setNormalizedEvents([]);
