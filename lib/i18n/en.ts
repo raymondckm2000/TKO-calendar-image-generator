@@ -2,6 +2,12 @@ export const en = {
   calendarFetcher: {
     title: "TKO Calendar Fetcher",
     subtitle: "Fetch public Google Calendar events and format them for review.",
+    calendarSourceLabel: "Calendar source",
+    sourceLabels: {
+      tko: "TKO 月曆",
+      birthdays: "生日月曆",
+      custom: "自訂 Google Calendar",
+    },
     calendarLinkLabel: "Google Calendar link",
     calendarLinkPlaceholder:
       "https://calendar.google.com/calendar/ical/.../public/basic.ics",

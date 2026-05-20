@@ -1,8 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState, useSyncExternalStore } from "react";
 
-import { DEFAULT_ICS_URL } from "@/lib/calendar/constants";
+import {
+  CALENDAR_SOURCE_IDS,
+  CALENDAR_SOURCES,
+  type CalendarSourceId,
+} from "@/lib/calendar/sources";
 import { en } from "@/lib/i18n/en";
 
 interface NormalizedEvent {
@@ -29,12 +33,31 @@ interface ExtractResponse {
 }
 
 const STORAGE_KEY = "tko-calendar-fetcher-form";
+const STORAGE_EVENT = "tko-calendar-fetcher-form-change";
 
 interface SavedForm {
   calendarLink?: string;
+  calendarSourceId?: string;
+  customCalendarLink?: string;
   year?: string;
   month?: string;
 }
+
+interface CalendarFetcherForm {
+  calendarSourceId: CalendarSourceId;
+  customCalendarLink: string;
+  year: string;
+  month: string;
+}
+
+const DEFAULT_FORM: CalendarFetcherForm = {
+  calendarSourceId: CALENDAR_SOURCE_IDS.tko,
+  customCalendarLink: "",
+  year: getDefaultYear(),
+  month: getDefaultMonth(),
+};
+let cachedStorageValue: string | null | undefined;
+let cachedForm: CalendarFetcherForm = DEFAULT_FORM;
 
 function getDefaultYear(): string {
   return String(new Date().getFullYear());
@@ -63,21 +86,84 @@ function getSavedForm(): SavedForm {
   }
 }
 
+function getDefaultForm(): CalendarFetcherForm {
+  return DEFAULT_FORM;
+}
+
+function isCalendarSourceId(value: string | undefined): value is CalendarSourceId {
+  return CALENDAR_SOURCES.some((source) => source.id === value);
+}
+
+function getCalendarSourceUrl(sourceId: CalendarSourceId): string {
+  return CALENDAR_SOURCES.find((source) => source.id === sourceId)?.url ?? "";
+}
+
+function getStoredForm(): CalendarFetcherForm {
+  if (typeof window === "undefined") {
+    return DEFAULT_FORM;
+  }
+
+  const storageValue = window.localStorage.getItem(STORAGE_KEY);
+
+  if (storageValue === cachedStorageValue) {
+    return cachedForm;
+  }
+
+  cachedStorageValue = storageValue;
+  const savedForm = getSavedForm();
+
+  cachedForm = {
+    calendarSourceId: isCalendarSourceId(savedForm.calendarSourceId)
+      ? savedForm.calendarSourceId
+      : CALENDAR_SOURCE_IDS.tko,
+    customCalendarLink:
+      savedForm.customCalendarLink ?? savedForm.calendarLink ?? "",
+    year: savedForm.year ?? getDefaultYear(),
+    month: savedForm.month ?? getDefaultMonth(),
+  };
+
+  return cachedForm;
+}
+
+function subscribeToStoredForm(onStoreChange: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener(STORAGE_EVENT, onStoreChange);
+
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener(STORAGE_EVENT, onStoreChange);
+  };
+}
+
+function saveStoredForm(form: CalendarFetcherForm) {
+  const storageValue = JSON.stringify(form);
+
+  cachedStorageValue = storageValue;
+  cachedForm = form;
+  window.localStorage.setItem(STORAGE_KEY, storageValue);
+  window.dispatchEvent(new Event(STORAGE_EVENT));
+}
+
 export function CalendarEventFetcher() {
   const strings = en.calendarFetcher;
-  const [calendarLink, setCalendarLink] = useState(
-    () => getSavedForm().calendarLink || DEFAULT_ICS_URL,
+  const form = useSyncExternalStore(
+    subscribeToStoredForm,
+    getStoredForm,
+    getDefaultForm,
   );
-  const [year, setYear] = useState(() => getSavedForm().year ?? getDefaultYear());
-  const [month, setMonth] = useState(
-    () => getSavedForm().month ?? getDefaultMonth(),
-  );
+  const { calendarSourceId, customCalendarLink, month, year } = form;
   const [summary, setSummary] = useState("");
   const [formattedText, setFormattedText] = useState("");
   const [normalizedEvents, setNormalizedEvents] = useState<NormalizedEvent[]>([]);
   const [error, setError] = useState("");
   const [isFetching, setIsFetching] = useState(false);
   const [copied, setCopied] = useState(false);
+  const showCustomCalendarLink =
+    calendarSourceId === CALENDAR_SOURCE_IDS.custom;
 
   const normalizedJson = useMemo(
     () =>
@@ -87,18 +173,15 @@ export function CalendarEventFetcher() {
     [normalizedEvents],
   );
 
-  useEffect(() => {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ calendarLink, year, month }),
-    );
-  }, [calendarLink, month, year]);
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsFetching(true);
     setError("");
     setCopied(false);
+
+    const calendarLink = showCustomCalendarLink
+      ? customCalendarLink
+      : getCalendarSourceUrl(calendarSourceId);
 
     try {
       const response = await fetch("/api/extract", {
@@ -165,15 +248,23 @@ export function CalendarEventFetcher() {
           onSubmit={handleSubmit}
         >
           <label className="flex flex-col gap-2 text-sm font-medium">
-            {strings.calendarLinkLabel}
-            <input
-              className="h-11 border border-zinc-300 px-3 text-sm font-normal outline-none focus:border-zinc-900"
-              onChange={(event) => setCalendarLink(event.target.value)}
-              placeholder={strings.calendarLinkPlaceholder}
-              required
-              type="url"
-              value={calendarLink}
-            />
+            {strings.calendarSourceLabel}
+            <select
+              className="h-11 border border-zinc-300 bg-white px-3 text-sm font-normal outline-none focus:border-zinc-900"
+              onChange={(event) =>
+                saveStoredForm({
+                  ...form,
+                  calendarSourceId: event.target.value as CalendarSourceId,
+                })
+              }
+              value={calendarSourceId}
+            >
+              {CALENDAR_SOURCES.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {strings.sourceLabels[source.id]}
+                </option>
+              ))}
+            </select>
           </label>
 
           <label className="flex flex-col gap-2 text-sm font-medium">
@@ -182,7 +273,9 @@ export function CalendarEventFetcher() {
               className="h-11 border border-zinc-300 px-3 text-sm font-normal outline-none focus:border-zinc-900"
               max="9999"
               min="1"
-              onChange={(event) => setYear(event.target.value)}
+              onChange={(event) =>
+                saveStoredForm({ ...form, year: event.target.value })
+              }
               required
               type="number"
               value={year}
@@ -193,7 +286,9 @@ export function CalendarEventFetcher() {
             {strings.monthLabel}
             <select
               className="h-11 border border-zinc-300 bg-white px-3 text-sm font-normal outline-none focus:border-zinc-900"
-              onChange={(event) => setMonth(event.target.value)}
+              onChange={(event) =>
+                saveStoredForm({ ...form, month: event.target.value })
+              }
               value={month}
             >
               {strings.months.map((monthName, index) => (
@@ -211,6 +306,25 @@ export function CalendarEventFetcher() {
           >
             {isFetching ? strings.fetchingButton : strings.fetchButton}
           </button>
+
+          {showCustomCalendarLink ? (
+            <label className="flex flex-col gap-2 text-sm font-medium sm:col-span-4">
+              {strings.calendarLinkLabel}
+              <input
+                className="h-11 border border-zinc-300 px-3 text-sm font-normal outline-none focus:border-zinc-900"
+                onChange={(event) =>
+                  saveStoredForm({
+                    ...form,
+                    customCalendarLink: event.target.value,
+                  })
+                }
+                placeholder={strings.calendarLinkPlaceholder}
+                required
+                type="url"
+                value={customCalendarLink}
+              />
+            </label>
+          ) : null}
         </form>
 
         {error ? (
